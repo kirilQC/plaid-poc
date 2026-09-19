@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { usePlaidLink } from "react-plaid-link";
+import { loadStripe } from "@stripe/stripe-js";
 
 export default function Home() {
   const [linkToken, setLinkToken] = useState(null);
@@ -9,6 +10,8 @@ export default function Home() {
   const [message, setMessage] = useState("");
   const [data, setData] = useState(null);
   const [loadingTxns, setLoadingTxns] = useState(false);
+  const [provider, setProvider] = useState(null); // "plaid" | "stripe"
+  const [stripeLoading, setStripeLoading] = useState(false);
 
   // Chase uses OAuth: Plaid redirects to chase.com and back here with
   // ?oauth_state_id=... In that case we must resume with the SAME link
@@ -32,20 +35,19 @@ export default function Home() {
           setLinkToken(d.link_token);
           localStorage.setItem("plaid_link_token", d.link_token);
         } else {
-          setStatus("error");
-          setMessage(d.error || "Could not create link token");
+          // Plaid not configured or errored: leave its button disabled so
+          // the Stripe path still works.
+          console.warn("Plaid link token:", d.error);
         }
       })
-      .catch(() => {
-        setStatus("error");
-        setMessage("Could not reach server");
-      });
+      .catch((e) => console.warn("Plaid link token:", e));
   }, []);
 
-  const fetchTransactions = useCallback(async () => {
+  const fetchTransactions = useCallback(async (prov) => {
     setLoadingTxns(true);
     setMessage("");
-    const res = await fetch("/api/transactions");
+    const url = prov === "stripe" ? "/api/stripe/transactions" : "/api/transactions";
+    const res = await fetch(url);
     const d = await res.json();
     setLoadingTxns(false);
     if (d.error) {
@@ -56,8 +58,47 @@ export default function Home() {
       );
     } else {
       setData(d);
+      if (d.pending) {
+        setMessage(
+          "Stripe is still pulling transaction history. Wait ~30s and hit Refresh."
+        );
+      }
     }
   }, []);
+
+  const connectStripe = useCallback(async () => {
+    setStripeLoading(true);
+    setMessage("");
+    try {
+      const pk = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
+      if (!pk) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
+      const stripe = await loadStripe(pk);
+      const res = await fetch("/api/stripe/create-session", { method: "POST" });
+      const d = await res.json();
+      if (!d.client_secret) throw new Error(d.error || "Could not create session");
+      const result = await stripe.collectFinancialConnectionsAccounts({
+        clientSecret: d.client_secret,
+      });
+      if (result.error) throw new Error(result.error.message);
+      const ids =
+        result.financialConnectionsSession?.accounts?.map((a) => a.id) || [];
+      if (!ids.length) throw new Error("No accounts were connected");
+      const storeRes = await fetch("/api/stripe/store-accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account_ids: ids }),
+      });
+      const stored = await storeRes.json();
+      if (!stored.connected) throw new Error(stored.error || "Store failed");
+      setProvider("stripe");
+      setStatus("connected");
+      fetchTransactions("stripe");
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setStripeLoading(false);
+    }
+  }, [fetchTransactions]);
 
   const onSuccess = useCallback(
     async (public_token) => {
@@ -69,8 +110,9 @@ export default function Home() {
       const d = await res.json();
       if (d.connected) {
         localStorage.removeItem("plaid_link_token");
+        setProvider("plaid");
         setStatus("connected");
-        fetchTransactions();
+        fetchTransactions("plaid");
       } else {
         setStatus("error");
         setMessage(d.error || "Token exchange failed");
@@ -113,15 +155,38 @@ export default function Home() {
             color: "#fff",
           }}
         >
-          Connect bank
+          Connect with Plaid
+        </button>
+      )}
+
+      {status !== "connected" && (
+        <button
+          onClick={connectStripe}
+          disabled={stripeLoading}
+          style={{
+            marginTop: 24,
+            marginLeft: 12,
+            padding: "12px 28px",
+            fontSize: 16,
+            fontWeight: 600,
+            borderRadius: 8,
+            border: "none",
+            cursor: stripeLoading ? "not-allowed" : "pointer",
+            background: "#635bff",
+            color: "#fff",
+          }}
+        >
+          {stripeLoading ? "Opening..." : "Connect with Stripe"}
         </button>
       )}
 
       {status === "connected" && (
         <div style={{ marginTop: 24 }}>
-          <div style={{ color: "#4ade80", fontWeight: 600 }}>Connected</div>
+          <div style={{ color: "#4ade80", fontWeight: 600 }}>
+            Connected via {provider === "stripe" ? "Stripe" : "Plaid"}
+          </div>
           <button
-            onClick={fetchTransactions}
+            onClick={() => fetchTransactions(provider)}
             disabled={loadingTxns}
             style={{
               marginTop: 12,
