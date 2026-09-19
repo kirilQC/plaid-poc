@@ -10,12 +10,28 @@ export default function Home() {
   const [data, setData] = useState(null);
   const [loadingTxns, setLoadingTxns] = useState(false);
 
+  // Chase uses OAuth: Plaid redirects to chase.com and back here with
+  // ?oauth_state_id=... In that case we must resume with the SAME link
+  // token we started with (kept in localStorage), not a fresh one.
+  const isOAuthRedirect =
+    typeof window !== "undefined" &&
+    window.location.search.includes("oauth_state_id=");
+
   useEffect(() => {
+    if (isOAuthRedirect) {
+      const saved = localStorage.getItem("plaid_link_token");
+      if (saved) {
+        setLinkToken(saved);
+        return;
+      }
+    }
     fetch("/api/create-link-token", { method: "POST" })
       .then((r) => r.json())
       .then((d) => {
-        if (d.link_token) setLinkToken(d.link_token);
-        else {
+        if (d.link_token) {
+          setLinkToken(d.link_token);
+          localStorage.setItem("plaid_link_token", d.link_token);
+        } else {
           setStatus("error");
           setMessage(d.error || "Could not create link token");
         }
@@ -52,6 +68,7 @@ export default function Home() {
       });
       const d = await res.json();
       if (d.connected) {
+        localStorage.removeItem("plaid_link_token");
         setStatus("connected");
         fetchTransactions();
       } else {
@@ -62,7 +79,19 @@ export default function Home() {
     [fetchTransactions]
   );
 
-  const { open, ready } = usePlaidLink({ token: linkToken, onSuccess });
+  const { open, ready } = usePlaidLink({
+    token: linkToken,
+    onSuccess,
+    ...(isOAuthRedirect
+      ? { receivedRedirectUri: window.location.href }
+      : {}),
+  });
+
+  // After returning from the bank's OAuth page, reopen Link automatically
+  // so it can finish the handshake.
+  useEffect(() => {
+    if (isOAuthRedirect && ready) open();
+  }, [isOAuthRedirect, ready, open]);
 
   return (
     <main style={{ maxWidth: 640, margin: "0 auto", padding: "64px 24px" }}>

@@ -9,6 +9,9 @@ export async function POST() {
       products: ["transactions"],
       country_codes: ["US"],
       language: "en",
+      ...(process.env.PLAID_REDIRECT_URI
+        ? { redirect_uri: process.env.PLAID_REDIRECT_URI }
+        : {}),
     });
     return NextResponse.json({ link_token: response.data.link_token });
   } catch (err) {
